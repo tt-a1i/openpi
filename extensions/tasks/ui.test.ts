@@ -8,8 +8,10 @@ import {
   renderTaskWidget,
   renderToolResult,
   taskCounts,
+  SPINNER_FRAME_MS,
   TASK_WIDGET_LIMIT,
 } from "./ui.ts";
+import { setTaskWidgetAttachment } from "../shared/task-widget-attachment.ts";
 
 // strikethrough is marked rather than dropped, so a test can assert which
 // subjects got struck without matching real ANSI escapes.
@@ -62,7 +64,7 @@ test("persistent task widget matches a compact Claude-style task panel", () => {
     theme,
     100,
   );
-  assert.equal(lines.length, 3);
+  assert.equal(lines.length, 4);
   // Same census as the full list, counted over tracked items only: the widget
   // hides the dropped one, so including it would not add up against the rows.
   assert.match(
@@ -73,7 +75,10 @@ test("persistent task widget matches a compact Claude-style task panel", () => {
   assert.doesNotMatch(lines[0]!, /ctrl\+shift\+t/);
   assert.match(lines[1]!, /T2 Implement task panel/);
   assert.match(lines[2]!, /T3 Verify rendering/);
-  assert.equal(lines.join("\n").includes("Finished setup"), false);
+  // Completed items stay in the widget, struck through like omp's todo HUD:
+  // the glance that finds what is left also sees what is behind. Dropped items
+  // stay hidden — deliberate discard, not history.
+  assert.match(lines[3]!, /T1 <s>Finished setup<\/s>/);
   assert.equal(lines.join("\n").includes("Dropped idea"), false);
   const narrow = renderTaskWidget(
     {
@@ -102,6 +107,76 @@ test("persistent task widget matches a compact Claude-style task panel", () => {
     ),
     [],
   );
+});
+
+test("in-progress row shimmers and spins across time", () => {
+  const snapshot = {
+    version: 1 as const,
+    revision: 1,
+    nextId: 2,
+    items: [{ id: 1, subject: "Busy task", status: "in_progress" as const }],
+  };
+  const marked = {
+    fg: (name: string, text: string) => `<${name}>${text}</${name}>`,
+    bold: (text: string) => `*${text}*`,
+    strikethrough: (text: string) => `<s>${text}</s>`,
+  } as unknown as Theme;
+  const at = (now: number) =>
+    renderTaskWidget(snapshot, marked, 100, false, now).join("\n");
+  // The spinner glyph advances with time…
+  assert.notEqual(at(0), at(SPINNER_FRAME_MS));
+  // …and the shimmer crest sweeps: at t=0 the band sits off the left edge
+  // (no accent run), half a second later it has swept onto the first
+  // character. The assertion targets the task row, not the census header
+  // (which legitimately uses accent for its ◆ mark).
+  const taskRow = (now: number) => at(now).split("\n").at(-1)!;
+  assert.doesNotMatch(taskRow(0), /<accent>/);
+  assert.match(taskRow(500), /\*<accent>B<\/accent>\*/);
+  // Different moments render different color sequences.
+  assert.notEqual(at(0), at(500));
+  // Without an in-progress item nothing shimmers: done rows keep plain text.
+  const doneAt = (now: number) =>
+    renderTaskWidget(
+      {
+        version: 1,
+        revision: 1,
+        nextId: 2,
+        items: [{ id: 1, subject: "Done task", status: "done" as const }],
+      },
+      marked,
+      100,
+      false,
+      now,
+    ).join("\n");
+  assert.equal(doneAt(0), doneAt(SPINNER_FRAME_MS * 10));
+});
+
+test("task widget renders a cross-extension attachment under the census", () => {
+  const widget = () =>
+    renderTaskWidget(
+      {
+        version: 1,
+        revision: 1,
+        nextId: 2,
+        items: [{ id: 1, subject: "Implement panel", status: "in_progress" }],
+      },
+      theme,
+      100,
+    );
+  assert.equal(widget().length, 2);
+  assert.doesNotMatch(widget().join("\n"), /完成信号/);
+
+  setTaskWidgetAttachment("⚠️ 完成信号（commit + 业主授权）— 请同步 tasks");
+  try {
+    const lines = widget();
+    assert.equal(lines.length, 3);
+    // The notice sits directly under the census header, above the task rows.
+    assert.match(lines[1]!, /完成信号/);
+    assert.match(lines[2]!, /T1 Implement panel/);
+  } finally {
+    setTaskWidgetAttachment(undefined);
+  }
+  assert.equal(widget().length, 2);
 });
 
 test("task widget defaults to four items and Ctrl+Shift+T view shows all", () => {

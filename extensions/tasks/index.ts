@@ -29,6 +29,7 @@ import {
   taskCounts,
   type TaskToolDetails,
 } from "./ui.ts";
+import { getTaskWidgetAttachment } from "../shared/task-widget-attachment.ts";
 
 const TOOL_NAMES = ["tasks_add", "tasks_update", "tasks_list"] as const;
 const TASK_WIDGET_KEY = "session-tasks-panel";
@@ -117,17 +118,38 @@ export default function sessionTasks(pi: ExtensionAPI) {
     }
     if (!ui || uiMode !== "tui") return false;
     const current = snapshot();
+    // The widget also stays up when only a cross-extension reminder is pinned
+    // (e.g. multi-signal-sync's completion notice): the notice is what the
+    // widget is for at that moment, even with zero open tasks.
     const shown =
-      taskWidgetVisible && !problemMessage() && hasActionableTasks();
+      taskWidgetVisible &&
+      !problemMessage() &&
+      (hasActionableTasks() || getTaskWidgetAttachment() !== undefined);
     if (!shown) {
       ui.setWidget(TASK_WIDGET_KEY, undefined);
       return false;
     }
-    ui.setWidget(TASK_WIDGET_KEY, (_tui, theme) => ({
-      render: (width) =>
-        renderTaskWidget(current, theme, width, taskWidgetExpanded),
-      invalidate() {},
-    }));
+    ui.setWidget(TASK_WIDGET_KEY, (tui, theme) => {
+      // Redraw cadence for the in-flight shimmer sweep: ~8 fps keeps the band
+      // advancing about one cell per frame (omp uses 30fps for its loader; the
+      // widget is text-only and 8 fps is plenty to read as flowing).
+      const timer = setInterval(() => tui.requestRender(), 120);
+      timer.unref?.();
+      return {
+        render: (width) =>
+          renderTaskWidget(
+            current,
+            theme,
+            width,
+            taskWidgetExpanded,
+            Date.now(),
+          ),
+        invalidate() {},
+        dispose() {
+          clearInterval(timer);
+        },
+      };
+    });
     return true;
   };
 
@@ -484,10 +506,42 @@ export default function sessionTasks(pi: ExtensionAPI) {
     }
   });
 
-  pi.on("agent_settled", () => {
+  pi.on("agent_settled", (_event, ctx) => {
     activeRun = false;
     frozenProjection = "";
+    notifyBlockedTasks(ctx);
   });
+
+  // Blocked tasks are the one state that needs a human in the loop (owner
+  // ruling, missing credential, external wait). The widget shows them with a
+  // `!` and the /tasks screen explains them, but neither raises an event — a
+  // turn that ends with a blocked task would sit silently until the user
+  // happens to look. Each blocked task is announced once per blocked stint;
+  // clearing the block (or dropping the task) re-arms it.
+  let notifiedBlocked = new Set<number>();
+  const notifyBlockedTasks = (ctx: ExtensionContext) => {
+    if (!ctx.hasUI) return;
+    const current = snapshot().items;
+    const blockedIds = new Set(
+      current
+        .filter((item) => item.status === "blocked")
+        .map((item) => item.id),
+    );
+    for (const item of current) {
+      if (item.status !== "blocked" || notifiedBlocked.has(item.id)) continue;
+      notifiedBlocked.add(item.id);
+      ctx.ui.notify(
+        `T${item.id} blocked: ${item.subject}${item.note ? ` — ${item.note}` : ""} · 需要人工介入`,
+        "warning",
+      );
+    }
+    // Re-arm ids that left the blocked state (or the list) so a later
+    // re-block announces again.
+    for (const id of notifiedBlocked) {
+      if (blockedIds.has(id)) continue;
+      notifiedBlocked.delete(id);
+    }
+  };
 
   pi.on("context", (event) => {
     if (!activeRun || !frozenProjection || problemMessage()) return;

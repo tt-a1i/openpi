@@ -481,7 +481,27 @@ export default function sessionGoal(pi: ExtensionAPI) {
     controller.settled(ctx);
     controller.settledWithoutAcknowledgement();
     updateUi(ctx);
+    notifyBlockedGoal(ctx);
   });
+
+  // A blocked goal needs a human in the loop (owner ruling, external wait);
+  // the footer says so but nothing raises an event. Announce it once per
+  // blocked stint, re-armed when the goal leaves the blocked state.
+  let notifiedGoalBlocked = false;
+  const notifyBlockedGoal = (ctx: ExtensionContext) => {
+    if (!ctx.hasUI) return;
+    const goal = controller.snapshot();
+    if (goal?.status === "blocked") {
+      if (notifiedGoalBlocked) return;
+      notifiedGoalBlocked = true;
+      ctx.ui.notify(
+        `Goal blocked: ${goal.objective} — 需要人工介入 (/goal resume)`,
+        "warning",
+      );
+    } else {
+      notifiedGoalBlocked = false;
+    }
+  };
 
   pi.on("session_shutdown", (_event, ctx) => {
     controller.shutdown();
