@@ -73,36 +73,124 @@ test("strip selection prefers newest running, then newest unread settled", () =>
   );
 });
 
-test("subagent strip matches Workflow's bounded one-line affordance", () => {
+test("subagent HUD mirrors omp: header plus one row per running subagent", () => {
   const strip = new BelowEditorStripState();
-  const entry = selectSubagentStripEntry(
-    [snapshot("sa-1", "running", Date.now() - 2_000)],
-    0,
-  );
+  const entries = [
+    snapshot("sa-1", "running", Date.now() - 2_000),
+    snapshot("sa-2", "running", Date.now() - 1_000),
+    snapshot("sa-0", "done", 0, 500),
+  ];
+  const entry = selectSubagentStripEntry(entries, 0);
   const widget = new SubagentStripWidget(
     { requestRender() {} } as unknown as TUI,
     theme,
     strip,
     () => entry,
+    () => entries,
   );
   try {
     const idle = widget.render(100);
-    assert.equal(idle.length, 1);
-    assert.match(idle[0]!, /sa-1/);
-    assert.doesNotMatch(idle[0]!, /payload/);
+    // Header + one row per running subagent + unread-settled notice row.
+    assert.equal(idle.length, 4);
+    assert.match(idle[0]!, /Subagents/);
+    assert.match(idle[0]!, /2 running/);
+    assert.match(idle[0]!, /1 done/);
+    assert.doesNotMatch(idle[0]!, /finished/);
     assert.match(idle[0]!, /↓ to manage/);
+    assert.doesNotMatch(idle.join("\n"), /payload/);
+    assert.match(idle[1]!, /sa-1/);
+    assert.match(idle[2]!, /sa-2/);
+    assert.match(idle[3]!, /1 finished — enter to review/);
+    // The settled subagent itself is not a running row.
+    assert.doesNotMatch(idle.join("\n"), /sa-0/);
 
     strip.focused = true;
-    const focused = widget.render(54);
-    assert.equal(focused.length, 1);
-    assert.ok(visibleWidth(focused[0]!) <= 54);
+    const focused = widget.render(100);
+    assert.equal(focused.length, 4);
     assert.match(focused[0]!, /enter open/);
 
-    for (const width of [1, 8, 20]) {
+    for (const width of [1, 8, 20, 54]) {
       const narrow = widget.render(width);
-      assert.equal(narrow.length, 1);
-      assert.ok(visibleWidth(narrow[0]!) <= width);
+      assert.equal(narrow.length, 4);
+      for (const line of narrow) assert.ok(visibleWidth(line) <= width);
     }
+  } finally {
+    widget.dispose();
+  }
+});
+
+test("subagent HUD collapses running rows past its limit", () => {
+  const strip = new BelowEditorStripState();
+  const now = Date.now();
+  const entries = Array.from({ length: 6 }, (_, index) =>
+    snapshot(`sa-${index + 1}`, "running", now - (6 - index)),
+  );
+  const widget = new SubagentStripWidget(
+    { requestRender() {} } as unknown as TUI,
+    theme,
+    strip,
+    () => selectSubagentStripEntry(entries, 0),
+    () => entries,
+  );
+  try {
+    const lines = widget.render(100);
+    // 1 header + 4 rows + 1 hidden-count row (no settled entries).
+    assert.equal(lines.length, 6);
+    assert.match(lines[0]!, /6 running/);
+    assert.match(lines[5]!, /… 2 more running/);
+  } finally {
+    widget.dispose();
+  }
+});
+
+test("subagent HUD shows the newest unfinished tool per running row", () => {
+  const strip = new BelowEditorStripState();
+  const busy = {
+    ...snapshot("sa-1", "running", Date.now() - 2_000),
+    liveTools: [
+      {
+        toolId: "a",
+        name: "read",
+        argsPreview: "src/a.ts",
+        done: true,
+      },
+      {
+        toolId: "b",
+        name: "bash",
+        argsPreview: "npm test",
+      },
+    ],
+  };
+  const widget = new SubagentStripWidget(
+    { requestRender() {} } as unknown as TUI,
+    theme,
+    strip,
+    () => ({ snapshot: busy, counts: { running: 1, done: 0, failed: 0 } }),
+    () => [busy],
+  );
+  try {
+    const lines = widget.render(120);
+    assert.equal(lines.length, 2);
+    // Newest unfinished tool (bash), not the finished read.
+    assert.match(lines[1]!, /⚙ bash/);
+    assert.match(lines[1]!, /npm test/);
+    assert.doesNotMatch(lines[1]!, /read/);
+  } finally {
+    widget.dispose();
+  }
+});
+
+test("subagent HUD hides itself when nothing is running or unread", () => {
+  const strip = new BelowEditorStripState();
+  const widget = new SubagentStripWidget(
+    { requestRender() {} } as unknown as TUI,
+    theme,
+    strip,
+    () => selectSubagentStripEntry([snapshot("old", "done", 1, 5)], 6),
+    () => [snapshot("old", "done", 1, 5)],
+  );
+  try {
+    assert.deepEqual(widget.render(100), []);
   } finally {
     widget.dispose();
   }

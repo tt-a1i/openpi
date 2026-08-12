@@ -43,7 +43,6 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { Container, Markdown, Spacer, Text } from "@earendil-works/pi-tui";
 import { Type, type Static } from "typebox";
-import { formatActivityStatus } from "../shared/activity-status.ts";
 import { waitBounded } from "../shared/child-session.ts";
 import { loadSetupConfig } from "../shared/setup-config.ts";
 import {
@@ -429,8 +428,6 @@ export default function workflows(pi: ExtensionAPI) {
    * next explicit request acknowledges them.
    */
   let lastContext: ExtensionContext | undefined;
-  let completedRuns = 0;
-  let failedRuns = 0;
   let widgetVisible = false;
   let requestWidgetRender: (() => void) | undefined;
   let dashboardOpen = false;
@@ -482,7 +479,9 @@ export default function workflows(pi: ExtensionAPI) {
         requestWidgetRender = () => tui.requestRender();
         return new WorkflowStripWidget(tui, theme, stripState, stripEntry);
       },
-      { placement: "belowEditor" },
+      // Above the editor, like the Subagents HUD: one contiguous block between
+      // the transcript and the prompt, never torn apart by tool rows.
+      { placement: "aboveEditor" },
     );
     widgetVisible = true;
   };
@@ -491,19 +490,9 @@ export default function workflows(pi: ExtensionAPI) {
     const ctx = lastContext;
     if (!ctx) return;
     try {
-      const running = activeRuns.size;
-      if (running === 0 && completedRuns === 0 && failedRuns === 0) {
-        ctx.ui.setStatus("workflows", undefined);
-      } else {
-        ctx.ui.setStatus(
-          "workflows",
-          formatActivityStatus(ctx.ui.theme, "workflows", {
-            running,
-            done: completedRuns,
-            failed: failedRuns,
-          }),
-        );
-      }
+      // Activity is reported by the HUD above the editor (header metrics,
+      // per-agent rows) — deliberately NOT also pinned to the footer status
+      // bar, so workflow state lives in exactly one place.
       updateWorkflowWidget();
     } catch {
       // UI may be unavailable.
@@ -511,15 +500,11 @@ export default function workflows(pi: ExtensionAPI) {
   };
 
   const acknowledgeSettledRuns = () => {
-    completedRuns = 0;
-    failedRuns = 0;
     settledRuns.clear();
   };
 
   const recordSettledRun = (details: WorkflowDetails) => {
     settledRuns.set(details.runId, details);
-    if (details.status === "completed") completedRuns += 1;
-    else failedRuns += 1;
   };
 
   const stopRun = (runId: string) => {
@@ -584,8 +569,6 @@ export default function workflows(pi: ExtensionAPI) {
       projectTrusted: ctx.isProjectTrusted(),
     }).agentTypes;
     turnStartedAt = 0;
-    completedRuns = 0;
-    failedRuns = 0;
     settledRuns.clear();
     installWorkflowNavigation(ctx);
     updateIndicator();

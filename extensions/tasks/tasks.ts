@@ -65,6 +65,88 @@ const REQUIRED_NOTE_STATUSES = new Set<TaskStatus>([
   "done",
   "dropped",
 ]);
+
+/**
+ * Order used when a single "next actionable task" must be picked (omp's
+ * `nextActionableTask`): the item in flight wins, then the oldest open one.
+ * Blocked items are waiting on something external — not actionable by the
+ * agent — so they are deliberately excluded.
+ */
+const ACTIONABLE_ORDER: Record<TaskStatus, number> = {
+  in_progress: 0,
+  pending: 1,
+  blocked: 2,
+  done: 3,
+  dropped: 4,
+};
+
+/** The next task an agent should be working on, or undefined when none. */
+export function nextActionableTask(
+  items: readonly TaskItem[],
+): TaskItem | undefined {
+  const actionable = items
+    .filter(
+      (item) => item.status === "pending" || item.status === "in_progress",
+    )
+    .sort(
+      (left, right) =>
+        ACTIONABLE_ORDER[left.status] - ACTIONABLE_ORDER[right.status] ||
+        left.id - right.id,
+    );
+  return actionable[0];
+}
+
+/**
+ * Fold a subject/description down to a stable match key (omp's
+ * `normalizeForTodoMatch`, plus space removal): lowercase, then every run of
+ * non-letter/non-digit characters — punctuation AND whitespace — is dropped,
+ * so "切片2：四端关卡" and "切片 2 四端关卡" reconcile (CJK text often
+ * spaces digits differently), and "Sonnet #2" matches "sonnet 2".
+ */
+export function normalizeForTaskMatch(value: string): string {
+  return value
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}]+/gu, "")
+    .trim();
+}
+
+/** omp's substring-fallback floor for todo↔description matching. */
+const TASK_MATCH_MIN_OVERLAP = 6;
+
+/**
+ * Whether a subagent description matches a task subject well enough to
+ * auto-close it (omp's `todoMatchesAnyDescription`): normalize-then-equal
+ * first, then a substring fallback in either direction with a length floor,
+ * so minor wording drift still links up.
+ */
+export function taskMatchesDescription(
+  subject: string,
+  description: string,
+): boolean {
+  const a = normalizeForTaskMatch(subject);
+  const b = normalizeForTaskMatch(description);
+  if (!a || !b) return false;
+  if (a === b) return true;
+  if (a.length >= TASK_MATCH_MIN_OVERLAP && b.includes(a)) return true;
+  if (b.length >= TASK_MATCH_MIN_OVERLAP && a.includes(b)) return true;
+  return false;
+}
+
+/**
+ * Single in-progress invariant (omp's `normalizeInProgressTask`): marking one
+ * item in_progress demotes any other in-progress item back to pending. The
+ * HUD and projections both read better when exactly one thing is in flight.
+ */
+export function normalizeSingleInProgress(
+  items: readonly TaskItem[],
+  inProgressId: number,
+): TaskItem[] {
+  return items.map((item) =>
+    item.id !== inProgressId && item.status === "in_progress"
+      ? { ...item, status: "pending" as const }
+      : item,
+  );
+}
 const SNAPSHOT_KEYS = new Set(["version", "revision", "nextId", "items"]);
 const ITEM_KEYS = new Set(["id", "subject", "detail", "status", "note"]);
 const ADD_KEYS = new Set(["subject", "detail", "status", "note"]);
@@ -235,12 +317,18 @@ export function applyTaskUpdate(
 
   const items = base.items.slice();
   items[index] = changed;
+  // Single in-progress invariant (omp's normalizeInProgressTask): starting
+  // this item demotes any other in-flight item back to pending.
+  const normalized =
+    status === "in_progress"
+      ? normalizeSingleInProgress(items, changed.id)
+      : items;
   const candidate = closeCompletedTaskBatch(
     validateTaskSnapshot({
       version: 1,
       revision: increment(base.revision, "snapshot revision"),
       nextId: base.nextId,
-      items,
+      items: normalized,
     }),
   );
   return { snapshot: candidate, items: cloneItems([changed]) };
@@ -449,6 +537,90 @@ export function createSessionTasks(
       current = cloneSnapshot(validateTaskSnapshot(snapshot));
     },
   };
+}
+
+/** omp's checklist markers, reused verbatim for export/import fidelity. */
+const STATUS_MARKER: Record<TaskStatus, string> = {
+  pending: " ",
+  in_progress: "/",
+  blocked: "!",
+  done: "x",
+  dropped: "-",
+};
+
+const MARKER_STATUS: Record<string, TaskStatus> = {
+  " ": "pending",
+  "": "pending",
+  x: "done",
+  X: "done",
+  "/": "in_progress",
+  ">": "in_progress",
+  "!": "blocked",
+  "-": "dropped",
+  "~": "dropped",
+};
+
+/**
+ * Render the batch as an editable Markdown checklist (omp's
+ * `phasesToMarkdown`): one line per task, marker in `[ ]`, done items as
+ * `[x]`. Notes ride in a trailing ` -- note` suffix so a hand-edited file
+ * still round-trips.
+ */
+export function tasksToMarkdown(snapshot: TaskSnapshot): string {
+  if (snapshot.items.length === 0) return "# Tasks\n";
+  const lines = snapshot.items.map((item) => {
+    const note = item.note ? ` -- ${singleLine(item.note)}` : "";
+    return `- [${STATUS_MARKER[item.status]}] ${singleLine(item.subject)}${note}`;
+  });
+  return `# Tasks\n\n${lines.join("\n")}\n`;
+}
+
+/**
+ * Parse an edited checklist back into task items (omp's `markdownToPhases`).
+ * The imported list replaces the batch wholesale; ids are reassigned in file
+ * order and the `-- note` suffix is recovered when present.
+ */
+export function markdownToTasks(markdown: string): {
+  items: TaskAddInput[];
+  errors: string[];
+} {
+  const items: TaskAddInput[] = [];
+  const errors: string[] = [];
+  const lines = markdown.split(/\r?\n/);
+  let inList = false;
+  for (let lineNumber = 0; lineNumber < lines.length; lineNumber++) {
+    const raw = lines[lineNumber]!;
+    const trimmed = raw.trim();
+    if (!trimmed) continue;
+    if (/^#{1,6}\s+/.test(trimmed)) {
+      inList = true;
+      continue;
+    }
+    const match = /^[-*+]\s*\[(.?)\]\s+(.+?)\s*$/.exec(trimmed);
+    if (!match) {
+      if (inList)
+        errors.push(`Line ${lineNumber + 1}: unrecognized syntax "${trimmed}"`);
+      continue;
+    }
+    const status = MARKER_STATUS[match[1]!];
+    if (!status) {
+      errors.push(
+        `Line ${lineNumber + 1}: unknown status marker "[${match[1]}]" (use [ ], [/], [x], [!], [-])`,
+      );
+      continue;
+    }
+    const rawContent = match[2]!.trim();
+    const noteMatch = /^(.*?)\s+--\s+(.*)$/.exec(rawContent);
+    const subject = noteMatch ? noteMatch[1]!.trim() : rawContent;
+    items.push({
+      subject: takeChars(subject, TASKS_LIMITS.subjectChars),
+      ...(noteMatch
+        ? { note: takeChars(noteMatch[2]!.trim(), TASKS_LIMITS.noteChars) }
+        : {}),
+      ...(status === "pending" ? {} : { status }),
+    });
+  }
+  return { items, errors };
 }
 
 export function isTaskBatchComplete(snapshot: TaskSnapshot) {
