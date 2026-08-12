@@ -100,6 +100,8 @@ interface MutableSnapshot {
   queued: SubagentSnapshot["queued"];
   finalText: string;
   turns: number;
+  lastActivityAt: number;
+  consecutiveFailures: number;
 }
 
 interface Entry {
@@ -301,6 +303,9 @@ const makeManager = Effect.gen(function* () {
     const s = entry.snapshot;
     const wasRestarting = entry.restarting === true;
     entry.restarting = false;
+    // A settled run ends its failure streak: the visibility layer only flags
+    // streaks while work is actually in flight.
+    s.consecutiveFailures = 0;
     if (s.status !== "running") {
       if (!wasRestarting) return;
       // A cancel can clear a queued restart before RunStarted reaches the
@@ -352,6 +357,9 @@ const makeManager = Effect.gen(function* () {
 
   const foldEvent = (entry: Entry, event: SubagentEvent) => {
     const s = entry.snapshot;
+    // Activity clock: every folded event is activity, so a stalled agent is
+    // definitionally one that stopped producing events.
+    s.lastActivityAt = Date.now();
     switch (event._tag) {
       case "RunStarted":
         entry.restarting = false;
@@ -429,6 +437,9 @@ const makeManager = Effect.gen(function* () {
       case "ToolEnd":
         entry.liveToolMap.delete(event.toolId);
         s.liveTools = [...entry.liveToolMap.values()];
+        // Failure streak for the visibility layer: consecutive failed tools
+        // reset on any success (or when the run settles).
+        s.consecutiveFailures = event.isError ? s.consecutiveFailures + 1 : 0;
         appendTranscript(s, {
           kind: "toolResult",
           toolId: event.toolId,
@@ -521,6 +532,8 @@ const makeManager = Effect.gen(function* () {
             queued: [],
             finalText: "",
             turns: 0,
+            lastActivityAt: Date.now(),
+            consecutiveFailures: 0,
           },
           session,
           scope,

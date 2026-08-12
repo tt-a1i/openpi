@@ -60,11 +60,6 @@ import {
   REASONING_EFFORTS,
   type SubagentSnapshot,
 } from "./src/domain.ts";
-import {
-  formatActivityStatus,
-  hasActivity,
-  unreadActivityCounts,
-} from "../shared/activity-status.ts";
 import { formatContextUtilization } from "./src/format.ts";
 import { SubagentManager, type SubagentManagerShape } from "./src/manager.ts";
 import {
@@ -98,6 +93,11 @@ import {
   BelowEditorStripState,
 } from "../shared/below-editor-navigation.ts";
 import { loadSetupConfig } from "../shared/setup-config.ts";
+import { recordSettledSubagent } from "../shared/task-reconcile.ts";
+import {
+  resetRunningSubagentDescriptions,
+  setRunningSubagentDescriptions,
+} from "../shared/task-reconcile.ts";
 import {
   PLAN_MODE_CHANNEL,
   planModeAllowsDeclaredTools,
@@ -209,7 +209,17 @@ export default function (pi: ExtensionAPI) {
         navigationManager = manager;
         manager.view.setOnSettled(onSettled);
         unsubStatus?.();
-        unsubStatus = manager.view.subscribe(() => updateStatus(manager));
+        unsubStatus = manager.view.subscribe(() => {
+          // Light-up source: keep the running-child descriptions fresh so the
+          // tasks widget can highlight pending tasks already being worked on.
+          setRunningSubagentDescriptions(
+            manager.view
+              .list()
+              .filter((snap) => snap.status === "running")
+              .map((snap) => snap.title || snap.id),
+          );
+          updateStatus(manager);
+        });
         updateStatus(manager);
         return manager;
       });
@@ -240,25 +250,25 @@ export default function (pi: ExtensionAPI) {
       widgetKey,
       (tui, theme) => {
         requestWidgetRender = () => tui.requestRender();
-        return new SubagentStripWidget(tui, theme, stripState, stripEntry);
+        return new SubagentStripWidget(
+          tui,
+          theme,
+          stripState,
+          stripEntry,
+          () => navigationManager?.view.list() ?? [],
+        );
       },
-      { placement: "belowEditor" },
+      // Above the editor, like omp's sticky Subagents HUD: one contiguous block
+      // between the transcript and the prompt, never torn apart by tool rows.
+      { placement: "aboveEditor" },
     );
     widgetVisible = true;
   };
 
   const updateStatus = (manager: SubagentManagerShape) => {
-    if (!ui) return;
-    const counts = unreadActivityCounts(
-      manager.view.list(),
-      settledAcknowledgedAt,
-    );
-    ui.setStatus(
-      "subagents",
-      hasActivity(counts)
-        ? formatActivityStatus(ui.theme, "subagents", counts)
-        : undefined,
-    );
+    // Activity is reported by the HUD above the editor (running rows, unread
+    // settled notice, header metrics) — deliberately NOT also pinned to the
+    // footer status bar, so subagent state lives in exactly one place.
     updateSubagentWidget();
   };
 
@@ -384,6 +394,15 @@ export default function (pi: ExtensionAPI) {
       deliverBtwResult({ ...snap, meta: { ...snap.meta } });
       return;
     }
+    // Reconciliation bridge (omp's #reconcileTodosWithSubagents): record the
+    // settled child so the tasks extension can auto-close a matching open
+    // task at agent_settled. Failed/aborted children are recorded with
+    // ok=false and deliberately left open by the reconciler.
+    recordSettledSubagent({
+      id: snap.id,
+      description: snap.title || snap.id,
+      ok: snap.status === "done",
+    });
     // Mark the finish in the transcript. The result itself reaches the model
     // separately; this line is for the reader watching the run.
     pi.appendEntry<SubagentFinishedData>("subagent-finished", {
@@ -437,8 +456,8 @@ export default function (pi: ExtensionAPI) {
     resultDelivery.clear();
     unsubStatus?.();
     unsubStatus = undefined;
+    resetRunningSubagentDescriptions();
     try {
-      ui?.setStatus("subagents", undefined);
       sessionContext?.ui.setWidget(widgetKey, undefined);
     } catch {
       // UI may already be disposed.

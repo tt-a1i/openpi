@@ -12,6 +12,9 @@ import {
   type TUI,
 } from "@earendil-works/pi-tui";
 import type { TaskItem, TaskSnapshot } from "./tasks.ts";
+import { taskMatchesDescription } from "./tasks.ts";
+import { getTaskWidgetAttachment } from "../shared/task-widget-attachment.ts";
+import { getRunningSubagentDescriptions } from "../shared/task-reconcile.ts";
 
 const STATUS_ICON: Record<TaskItem["status"], string> = {
   pending: "○",
@@ -20,6 +23,54 @@ const STATUS_ICON: Record<TaskItem["status"], string> = {
   done: "✓",
   dropped: "×",
 };
+
+/**
+ * Time-driven busy glyph for the widget's in-progress row, mirroring omp's
+ * spinner cadence: the row visibly moves while work is in flight, so a long
+ * agent turn cannot read as a frozen task panel. Static views (tool results,
+ * the /tasks screen) keep the plain `●`, because they are settled snapshots.
+ */
+export const SPINNER_FRAMES = ["◐", "◓", "◑", "◒"] as const;
+export const SPINNER_FRAME_MS = 160;
+
+export function spinnerFrame(now: number) {
+  return Math.floor(now / SPINNER_FRAME_MS) % SPINNER_FRAMES.length;
+}
+
+/**
+ * Sweep a brightness band across a text run, omp-style shimmer: every
+ * character outside the band is dim, inside it steps up to muted and then
+ * accent+bold at the crest. The band advances at a fixed cell velocity, so at
+ * the widget's redraw cadence it moves about one cell per frame — the row
+ * visibly *flows* from across the room, unlike a small spinning glyph that
+ * only reads up close.
+ */
+export function shimmerText(
+  text: string,
+  theme: Theme,
+  now: number,
+  options: { speedCellsPerS?: number; bandHalfWidth?: number } = {},
+): string {
+  const speed = options.speedCellsPerS ?? 8;
+  const bandHalf = options.bandHalfWidth ?? 5;
+  const width = [...text].length;
+  if (width === 0) return text;
+  const period = width + bandHalf * 2;
+  const crest = (((now / 1000) * speed) % period) - bandHalf;
+  let out = "";
+  let index = 0;
+  for (const ch of text) {
+    const dist = Math.abs(index - crest);
+    out +=
+      dist <= 1
+        ? theme.bold(theme.fg("accent", ch))
+        : dist <= bandHalf
+          ? theme.fg("muted", ch)
+          : theme.fg("dim", ch);
+    index++;
+  }
+  return out;
+}
 
 const TASK_WIDGET_ORDER: Record<TaskItem["status"], number> = {
   in_progress: 0,
@@ -202,6 +253,7 @@ export function renderTaskWidget(
   theme: Theme,
   width: number,
   expanded = false,
+  now = Date.now(),
 ) {
   const tracked = snapshot.items.filter((item) => item.status !== "dropped");
   const actionable = tracked
@@ -213,7 +265,15 @@ export function renderTaskWidget(
     );
   if (actionable.length === 0) return [];
 
-  const hasOverflow = actionable.length > TASK_WIDGET_LIMIT;
+  // Completed items stay visible, struck through and dimmed, mirroring omp's
+  // todo HUD: the glance that finds what is left also sees what is behind.
+  // Dropped items stay hidden — they are deliberate discard, not history.
+  const done = tracked
+    .filter((item) => item.status === "done")
+    .sort((left, right) => left.id - right.id);
+  const all = [...actionable, ...done];
+
+  const hasOverflow = all.length > TASK_WIDGET_LIMIT;
   const toggleHint = hasOverflow
     ? `  ·  ctrl+shift+t ${expanded ? "collapse" : "show all"}`
     : "";
@@ -226,27 +286,56 @@ export function renderTaskWidget(
     "  " +
     renderTaskSummary(taskCounts(tracked), theme) +
     theme.fg("dim", `  ·  /tasks${toggleHint}`);
-  const visible = expanded
-    ? actionable
-    : actionable.slice(0, TASK_WIDGET_LIMIT);
-  const hidden = actionable.length - visible.length;
+  const visible = expanded ? all : all.slice(0, TASK_WIDGET_LIMIT);
+  const hidden = all.length - visible.length;
   // Right-aligned like the full list, with the same floor: a widget whose ids
   // are ragged next to a list whose ids are not reads as a different control.
   const idWidth = Math.max(...visible.map((i) => `T${i.id}`.length), 3);
   const lines = [truncateToWidth(header, width)];
+  // A sibling extension (multi-signal-sync) can pin a completion-signal
+  // reminder here; it renders as the first row under the census so the notice
+  // reads together with the list it asks the agent to sync.
+  const attachment = getTaskWidgetAttachment();
+  if (attachment) {
+    lines.push(truncateToWidth(theme.fg("warning", `  ${attachment}`), width));
+  }
   for (const [index, item] of visible.entries()) {
     const color =
+      item.status === "done"
+        ? "success"
+        : item.status === "in_progress"
+          ? "warning"
+          : item.status === "blocked"
+            ? "error"
+            : "muted";
+    const icon =
       item.status === "in_progress"
-        ? "warning"
-        : item.status === "blocked"
-          ? "error"
-          : "muted";
+        ? SPINNER_FRAMES[spinnerFrame(now)]
+        : STATUS_ICON[item.status];
+    // Light up (omp): a pending task a running subagent's title matches is
+    // already being worked on — render it accent so the overlap is visible
+    // before the reconcile closes it.
+    const litUp =
+      item.status === "pending" &&
+      getRunningSubagentDescriptions().some((description) =>
+        taskMatchesDescription(item.subject, description),
+      );
+    // The in-flight row's subject carries the shimmer sweep instead of the
+    // static full-weight bold: the whole row flows, so "still running" reads
+    // at a glance from across the room.
+    const subject =
+      item.status === "in_progress"
+        ? shimmerText(item.subject, theme, now)
+        : litUp
+          ? theme.bold(theme.fg("accent", item.subject))
+          : subjectStyle(item.status, theme)(item.subject);
     const branch = index === visible.length - 1 && hidden === 0 ? "╰─" : "├─";
     lines.push(
       truncateToWidth(
         // Same subject weighting as the full list, so the item in flight reads
-        // the same wherever you happen to be looking.
-        `${theme.fg("dim", branch)} ${theme.fg(color, STATUS_ICON[item.status])} ${theme.fg("dim", `T${item.id}`.padStart(idWidth))} ${subjectStyle(item.status, theme)(item.subject)}`,
+        // the same wherever you happen to be looking; done subjects carry the
+        // same strikethrough as the tool result and the /tasks screen.
+        `${theme.fg("dim", branch)} ${theme.fg(litUp ? "accent" : color, icon)} ${theme.fg("dim", `T${item.id}`.padStart(idWidth))} ${subject}`,
         width,
       ),
     );

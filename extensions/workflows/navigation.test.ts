@@ -179,7 +179,7 @@ test("workflow strip sanitizes restored or legacy metadata defensively", () => {
   }
 });
 
-test("the workflow strip stays one line, bounded, and exposes its navigation hint", () => {
+test("the workflow HUD stays bounded and exposes its navigation hint", () => {
   const strip = new WorkflowStripState();
   const tui = { requestRender() {} } as unknown as TUI;
   const widget = new WorkflowStripWidget(tui, theme, strip, () => ({
@@ -188,14 +188,16 @@ test("the workflow strip stays one line, bounded, and exposes its navigation hin
   }));
   try {
     const idle = widget.render(100);
-    assert.equal(idle.length, 1);
+    // Header + one row per agent (the fixture carries one).
+    assert.equal(idle.length, 2);
     assert.match(idle[0]!, /repair-docs/);
     assert.match(idle[0]!, /↓ to manage/);
+    assert.match(idle[1]!, /chapter-2/);
 
     strip.focused = true;
     const focused = widget.render(56);
-    assert.equal(focused.length, 1);
-    assert.ok(visibleWidth(focused[0]!) <= 56);
+    assert.equal(focused.length, 2);
+    for (const line of focused) assert.ok(visibleWidth(line) <= 56);
     assert.match(focused[0]!, /enter open/);
   } finally {
     widget.dispose();

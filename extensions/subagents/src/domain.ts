@@ -229,6 +229,70 @@ export interface SubagentSnapshot {
   readonly finalText: string;
   /** Count of finalized assistant messages (for subagent_check). */
   readonly turns: number;
+  /**
+   * Monotonic wall clock of the last folded event (visibility layer): a
+   * running agent with no recent activity is stalled, not busy.
+   */
+  readonly lastActivityAt?: number;
+  /** Consecutive tool failures (isError ToolEnd), reset on any success. */
+  readonly consecutiveFailures?: number;
+}
+
+// --- Activity domain (visibility layer) -------------------------------------
+// DDD: pure value-domain functions over the snapshot; no I/O, fully testable.
+// They answer the three-state question the UI must be able to ask of any
+// running agent: 在动 (live tool/intent) / 在等 (stalled) / 死了 (failure streak).
+
+/** How long a running agent may stay silent before the HUD flags it. */
+export const STALL_THRESHOLD_MS = 5 * 60_000;
+
+/** Default activity clock when a snapshot predates the field. */
+export function lastActivityOf(snap: SubagentSnapshot): number {
+  return snap.lastActivityAt ?? snap.createdAt;
+}
+
+/**
+ * Whether a running agent has produced no activity for the threshold: it is
+ * not working — it is stuck, and the surface must say so instead of letting
+ * a plausible "running" status stall the user.
+ */
+export function isStalled(
+  snap: SubagentSnapshot,
+  now: number,
+  thresholdMs: number = STALL_THRESHOLD_MS,
+): boolean {
+  if (snap.status !== "running") return false;
+  return now - lastActivityOf(snap) > thresholdMs;
+}
+
+/**
+ * Intent fallback when no tool is in flight (omp's `lastIntent`): the most
+ * recent streaming text, else the latest assistant text in the transcript,
+ * bounded to one line. A running agent with neither tool nor intent is
+ * invisible — this closes that gap.
+ */
+export function lastIntentOf(snap: SubagentSnapshot): string | undefined {
+  const live = snap.liveAssistant?.text.trim();
+  if (live) return live;
+  for (let index = snap.transcript.length - 1; index >= 0; index--) {
+    const item = snap.transcript[index];
+    if (item?.kind !== "assistant") continue;
+    const text = item.parts
+      .filter((part) => part.type === "text" && part.text.trim())
+      .map((part) => (part.type === "text" ? part.text.trim() : ""))
+      .join(" ")
+      .trim();
+    if (text) return text;
+  }
+  return undefined;
+}
+
+/**
+ * Consecutive tool failures (isError ToolEnd), reset on any success: a
+ * streak of 2+ means the agent is fighting something, not making progress.
+ */
+export function failureStreakOf(snap: SubagentSnapshot): number {
+  return snap.consecutiveFailures ?? 0;
 }
 
 /** Final text, or the live streaming buffer while a run is active (v1 `latestOutput`). */

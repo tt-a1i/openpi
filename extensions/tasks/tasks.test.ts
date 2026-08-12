@@ -6,11 +6,17 @@ import {
   TaskRestoreError,
   TaskValidationError,
   applyTaskAdd,
+  applyTaskUpdate,
   createSessionTasks,
   emptyTaskSnapshot,
+  markdownToTasks,
+  nextActionableTask,
+  normalizeForTaskMatch,
   projectTasks,
   renderTaskList,
   restoreTaskSnapshot,
+  taskMatchesDescription,
+  tasksToMarkdown,
   validateTaskSnapshot,
   type TaskSnapshot,
   type TaskStatus,
@@ -98,7 +104,7 @@ test("completed batches reset immediately and the next batch restarts at T1", ()
   assert.equal(next.snapshot.revision, 4);
 });
 
-test("all status transitions are allowed and multiple items may be in progress", () => {
+test("all status transitions are allowed; starting a task demotes prior in-flight ones", () => {
   const statuses: TaskStatus[] = [
     "pending",
     "in_progress",
@@ -140,11 +146,16 @@ test("all status transitions are allowed and multiple items may be in progress",
     }
   }
 
+  // Single in-progress invariant (omp's normalizeInProgressTask): starting
+  // B demotes A back to pending, so exactly one item is in flight.
   const tasks = createSessionTasks();
   tasks.commit(tasks.add([{ subject: "A" }, { subject: "B" }]).snapshot);
   tasks.commit(tasks.update({ id: 1, status: "in_progress" }).snapshot);
   tasks.commit(tasks.update({ id: 2, status: "in_progress" }).snapshot);
-  assert.equal(tasks.list({ status: "in_progress" }).length, 2);
+  const inFlight = tasks.list({ status: "in_progress" });
+  assert.equal(inFlight.length, 1);
+  assert.equal(inFlight[0]?.id, 2);
+  assert.equal(tasks.list({ id: 1 })[0]?.status, "pending");
 });
 
 test("status entry requires a fresh note and stale notes clear only on leaving", () => {
@@ -571,4 +582,105 @@ test("ordinary newlines and tabs normalize to a single line", () => {
     status: "done",
     note: "npm test 21 passed",
   });
+});
+
+test("nextActionableTask prefers in-flight over oldest pending, excludes blocked", () => {
+  assert.equal(
+    nextActionableTask([
+      { id: 1, subject: "blocked one", status: "blocked", note: "wait" },
+      { id: 2, subject: "old open", status: "pending" },
+      { id: 3, subject: "in flight", status: "in_progress" },
+      { id: 4, subject: "done one", status: "done", note: "ok" },
+    ])?.id,
+    3,
+  );
+  assert.equal(
+    nextActionableTask([
+      { id: 2, subject: "old open", status: "pending" },
+      { id: 5, subject: "newer open", status: "pending" },
+    ])?.id,
+    2,
+  );
+  assert.equal(
+    nextActionableTask([
+      { id: 1, subject: "blocked one", status: "blocked", note: "wait" },
+    ]),
+    undefined,
+  );
+});
+
+test("task matching normalizes case, spacing, and punctuation", () => {
+  assert.equal(taskMatchesDescription("Fix bug", "fix bug"), true);
+  assert.equal(taskMatchesDescription("Fix bug", "Fix\tbug!"), true);
+  assert.equal(
+    taskMatchesDescription("切片2：四端关卡操作", "切片 2 四端关卡"),
+    true,
+  ); // substring fallback
+  assert.equal(taskMatchesDescription("abc", "abcdefgh"), false); // floor
+  assert.equal(
+    taskMatchesDescription("unrelated", "completely different"),
+    false,
+  );
+});
+
+test("single in-progress invariant demotes other in-flight items", () => {
+  const { snapshot } = applyTaskUpdate(
+    {
+      version: 1,
+      revision: 1,
+      nextId: 4,
+      items: [
+        { id: 1, subject: "A", status: "in_progress" },
+        { id: 2, subject: "B", status: "pending" },
+      ],
+    },
+    { id: 2, status: "in_progress" },
+  );
+  const byId = new Map(snapshot.items.map((item) => [item.id, item]));
+  assert.equal(byId.get(1)?.status, "pending");
+  assert.equal(byId.get(2)?.status, "in_progress");
+});
+
+test("markdown export/import round-trips statuses, subjects, and notes", () => {
+  const snapshot: TaskSnapshot = {
+    version: 1 as const,
+    revision: 4,
+    nextId: 5,
+    items: [
+      { id: 1, subject: "Setup", status: "done", note: "15 tests passed" },
+      { id: 2, subject: "Implement panel", status: "in_progress" },
+      { id: 3, subject: "Wait for owner", status: "blocked", note: "裁定" },
+      { id: 4, subject: "Scrap idea", status: "dropped", note: "unused" },
+    ],
+  };
+  const markdown = tasksToMarkdown(snapshot);
+  assert.match(markdown, /\[x\] Setup -- 15 tests passed/);
+  assert.match(markdown, /\[\/\] Implement panel/);
+  assert.match(markdown, /\[!\] Wait for owner -- 裁定/);
+  const parsed = markdownToTasks(markdown);
+  assert.deepEqual(parsed.errors, []);
+  assert.deepEqual(
+    parsed.items.map((item) => [
+      item.subject,
+      item.status ?? "pending",
+      item.note,
+    ]),
+    [
+      ["Setup", "done", "15 tests passed"],
+      ["Implement panel", "in_progress", undefined],
+      ["Wait for owner", "blocked", "裁定"],
+      ["Scrap idea", "dropped", "unused"],
+    ],
+  );
+});
+
+test("markdown import reports unrecognized lines and markers", () => {
+  const parsed = markdownToTasks(
+    "# Tasks\n- [z] bad marker\n- [ ] ok\nnot a list line\n",
+  );
+  assert.ok(
+    parsed.errors.some((error) => error.includes("unknown status marker")),
+  );
+  assert.equal(parsed.items.length, 1);
+  assert.equal(parsed.items[0]?.subject, "ok");
 });
