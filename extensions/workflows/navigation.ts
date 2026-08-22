@@ -94,7 +94,9 @@ export class WorkflowStripWidget {
     const right = renderNavigationMetrics(
       this.theme,
       [
-        `${settled}/${details.agents.length} agents`,
+        details.agents.length > 0
+          ? `${settled}/${details.agents.length} agents`
+          : undefined,
         formatElapsed(details.startedAt, details.finishedAt),
         tokenCount > 0 ? `${formatTokens(tokenCount)} tokens` : undefined,
       ],

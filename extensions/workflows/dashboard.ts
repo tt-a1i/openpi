@@ -5,8 +5,8 @@
  *   name                                             5/5 agents · 31m18s · done
  *   description
  *   ╭ Phases ────────────╮ ╭ Gather · 3 agents ──────────────────────────────╮
- *   │ ❯ ■ Gather     3/3 │ │ ■ CodeRabbit feedback   gpt-5 · 7%/372k  5m37s│
- *   │   ■ Verify     1/1 │ │ ■ Other bot feedback    gpt-5 · 9%/372k  4m43s│
+ *   │ ❯ ✓ Gather     3/3 │ │ ✓ CodeRabbit feedback   gpt-5 · 7%/372k  5m37s│
+ *   │   ⠿ Verify     1/1 │ │ ⠿ Other bot feedback    gpt-5 · 9%/372k  4m43s│
  *   ╰────────────────────╯ ╰─────────────────────────────────────────────────╯
  *   up/down select · right enter · left back · s save report
  */
@@ -26,12 +26,14 @@ import {
   visibleWidth,
   wrapTextWithAnsi,
 } from "@earendil-works/pi-tui";
+import { contextPercent } from "../shared/context-utilization.ts";
 import {
   panelFrame,
   type ScreenHint,
   screenTitleLine,
   hintLine as sharedHintLine,
 } from "../shared/screen-chrome.ts";
+import { spinnerFrame } from "../shared/spinner.ts";
 import { sanitizeTerminalText } from "../shared/terminal-text.ts";
 import { isAcceptanceLedger } from "./acceptance.ts";
 import { projectWorkflowGraph } from "./graph-projection.ts";
@@ -53,11 +55,11 @@ import {
   phaseGroups,
   resolveWorkflowRunTarget,
   resultJson,
-  SQUARE,
   sanitizeLine,
   shortenHome,
-  stateSquare,
+  stateGlyph,
   statusColor,
+  statusGlyph,
   statusWord,
   type Theme,
   type TranscriptEntry,
@@ -1002,7 +1004,7 @@ export class WorkflowDashboard {
         ) +
         theme.fg(statusColor(d.status), statusWord(d.status)) +
         " ";
-      const left = ` ${marker} ${statusSquareFor(d, theme)} ${label} ${theme.fg("dim", d.runId)}`;
+      const left = ` ${marker} ${statusGlyph(d.status, theme, Date.now())} ${label} ${theme.fg("dim", d.runId)}`;
       return this.split(left, right, width - 2);
     });
     lines.push(...this.panel("Runs", rows, width, panelHeight));
@@ -1033,22 +1035,31 @@ export class WorkflowDashboard {
 
     const { done, failed } = countStates(d);
     const settled = done + failed;
+    // Same language as the transcript card: the glyph carries the state, the
+    // status word only shows for terminal states.
     const right =
       theme.fg(
         "dim",
-        `${settled}/${d.agents.length} agents · ${formatElapsed(d.startedAt, d.finishedAt)} · `,
+        `${settled}/${d.agents.length} agents · ${formatElapsed(d.startedAt, d.finishedAt)}`,
       ) +
-      theme.fg(statusColor(d.status), statusWord(d.status)) +
-      " ";
+      (d.status === "running"
+        ? " "
+        : theme.fg("dim", " · ") +
+          theme.fg(statusColor(d.status), statusWord(d.status)) +
+          " ");
     lines.push(
       this.split(
-        " " + theme.bold(theme.fg("accent", d.name ?? d.runId)),
+        ` ${statusGlyph(d.status, theme, Date.now())} ${theme.bold(theme.fg("accent", d.name ?? d.runId))}`,
         right,
         width,
       ),
     );
     const totals = formatUsage(aggregateUsage(d.agents));
-    const graphSummary = d.graph ? workflowGraphSummary(d.graph) : undefined;
+    // A graph with no edges is a flat swarm — "N nodes · 0 edges" is noise.
+    const graphSummary =
+      d.graph && d.graph.edges.length > 0
+        ? workflowGraphSummary(d.graph)
+        : undefined;
     const subRight = [graphSummary, totals].filter(Boolean).join(" · ");
     const subLeft = " " + theme.fg("muted", d.description ?? d.runId);
     lines.push(
@@ -1089,7 +1100,7 @@ export class WorkflowDashboard {
       const groupDone = group.agents.filter(
         (a) => a.state !== "running",
       ).length;
-      const square = groupSquare(group, theme);
+      const square = groupGlyph(group, theme);
       const title =
         selected && this.detailFocus === "phases"
           ? theme.fg("accent", group.title)
@@ -1110,6 +1121,10 @@ export class WorkflowDashboard {
         0,
         ...selectedGroup.agents.map((a) => a.label.length),
       );
+      const models = new Set(
+        selectedGroup.agents.map((a) => a.model).filter(Boolean),
+      );
+      const mixedModels = models.size > 1;
       const agentWindow = this.windowed(
         selectedGroup.agents,
         this.agentIndex,
@@ -1122,9 +1137,18 @@ export class WorkflowDashboard {
           selected && this.detailFocus === "agents"
             ? theme.fg("accent", "❯")
             : " ";
+        // The model repeats on every row when the run is homogeneous; only
+        // mixed fleets earn a per-row model. Context occupancy matters while
+        // an agent runs; once settled, its cost is the elapsed on the right.
+        const percent = contextPercent({
+          tokens: agent.usage.contextTokens,
+          contextWindow: agent.contextWindow,
+        });
         const stats = [
-          agent.model,
-          agentContext(agent),
+          mixedModels ? agent.model : undefined,
+          agent.state === "running" && percent !== undefined
+            ? `${percent}%`
+            : undefined,
           agent.acceptance
             ? `acceptance:${agent.acceptance.status}`
             : undefined,
@@ -1135,7 +1159,7 @@ export class WorkflowDashboard {
           selected && this.detailFocus === "agents"
             ? theme.fg("accent", agent.label.padEnd(Math.min(maxLabel, 40)))
             : theme.fg("text", agent.label.padEnd(Math.min(maxLabel, 40)));
-        const left = ` ${marker} ${stateSquare(agent.state, theme)} ${label}  ${theme.fg("dim", stats)}`;
+        const left = ` ${marker} ${stateGlyph(agent.state, theme, Date.now())} ${label}${stats ? `  ${theme.fg("dim", stats)}` : ""}`;
         const right = theme.fg(
           "dim",
           `${formatElapsed(agent.startedAt, agent.finishedAt)} `,
@@ -1144,7 +1168,7 @@ export class WorkflowDashboard {
         if (agent.error) {
           agentRows.push(
             truncateToWidth(
-              `       ${theme.fg("error", sanitizeLine(agent.error, 2_000))}`,
+              `       ${theme.fg("error", displayError(agent.error))}`,
               agentsInner,
               "…",
             ),
@@ -1237,14 +1261,30 @@ export class WorkflowDashboard {
     }
 
     for (const entry of agent.transcript) {
+      // Tool calls are one-liners: the arrow shows direction, the accent name
+      // says what ran, and the arguments collapse to a single compact line
+      // instead of a vertical JSON block.
+      if (entry.role === "tool") {
+        const name = entry.name ? sanitizeLine(entry.name, 160) : "unknown";
+        const args = compactInlineJson(entry.text);
+        rows.push(
+          ` ${theme.fg("muted", "→")} ${theme.fg("accent", name)}${args ? theme.fg("dim", ` ${args}`) : ""}`,
+        );
+        continue;
+      }
       const label = transcriptLabel(entry);
       const color = transcriptColor(entry);
+      const marker = entry.role === "toolResult" ? "←" : "●";
       rows.push(
-        ` ${theme.fg(color, SQUARE)} ${theme.bold(theme.fg(color, label))}`,
+        ` ${theme.fg(color, marker)} ${theme.bold(theme.fg(color, label))}`,
       );
       const contentWidth = Math.max(8, width - 4);
       const styled = theme.fg(
-        entry.role === "thinking" ? "dim" : entry.isError ? "error" : "text",
+        entry.role === "thinking" || entry.role === "toolResult"
+          ? "dim"
+          : entry.isError
+            ? "error"
+            : "text",
         sanitizeTerminalText(entry.text),
       );
       for (const line of wrapTextWithAnsi(styled, contentWidth)) {
@@ -1276,7 +1316,7 @@ export class WorkflowDashboard {
     );
     lines.push(
       this.split(
-        ` ${stateSquare(agent.state, theme)} ${theme.bold(theme.fg("accent", agent.label))}`,
+        ` ${stateGlyph(agent.state, theme, Date.now())} ${theme.bold(theme.fg("accent", agent.label))}`,
         right,
         width,
       ),
@@ -1320,13 +1360,38 @@ export class WorkflowDashboard {
   }
 }
 
+/**
+ * Agent errors often arrive as an HTTP status plus a JSON body
+ * (`429: {"message":"user rate limit exceeded …"}`); the panel row keeps the
+ * status code and the message, dropping the braces and quotes.
+ */
+function displayError(error: string): string {
+  const clean = sanitizeLine(error, 2_000);
+  const match = clean.match(/^(\d{3})[:\s]*\{\s*"message"\s*:\s*"([^"]+)"/);
+  if (match) return `${match[1]}: ${match[2]}`;
+  return clean;
+}
+
 function transcriptLabel(entry: TranscriptEntry): string {
-  if (entry.role === "user") return "USER";
-  if (entry.role === "assistant") return "ASSISTANT";
-  if (entry.role === "thinking") return "THINKING";
+  if (entry.role === "user") return "user";
+  if (entry.role === "assistant") return "assistant";
+  if (entry.role === "thinking") return "thinking";
   const name = entry.name ? sanitizeLine(entry.name, 160) : "unknown";
-  if (entry.role === "tool") return `TOOL ${name}`;
-  return `RESULT ${name}`;
+  return name;
+}
+
+/**
+ * Tool arguments arrive pretty-printed over many lines; the transcript shows
+ * them inline. Non-JSON text passes through flattened.
+ */
+function compactInlineJson(text: string): string {
+  const flat = text.trim();
+  if (!flat) return "";
+  try {
+    return JSON.stringify(JSON.parse(flat));
+  } catch {
+    return flat.replace(/\s+/g, " ");
+  }
 }
 
 function transcriptColor(
@@ -1340,17 +1405,13 @@ function transcriptColor(
   return "muted";
 }
 
-function statusSquareFor(details: WorkflowDetails, theme: Theme): string {
-  return theme.fg(statusColor(details.status), SQUARE);
-}
-
-function groupSquare(group: PhaseGroup, theme: Theme): string {
-  if (group.agents.length === 0) return theme.fg("dim", SQUARE);
+function groupGlyph(group: PhaseGroup, theme: Theme): string {
+  if (group.agents.length === 0) return theme.fg("dim", "○");
   if (group.agents.some((a) => a.state === "running"))
-    return theme.fg("warning", SQUARE);
+    return theme.fg("warning", spinnerFrame(Date.now()));
   if (group.agents.some((a) => a.state === "error"))
-    return theme.fg("error", SQUARE);
-  return theme.fg("success", SQUARE);
+    return theme.fg("error", "✗");
+  return theme.fg("success", "✓");
 }
 
 /** Open the dashboard as a full-screen overlay. */

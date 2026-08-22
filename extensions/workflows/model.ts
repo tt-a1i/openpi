@@ -9,6 +9,7 @@ import {
   type ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
 import { formatContextUtilization } from "../shared/context-utilization.ts";
+import { spinnerFrame } from "../shared/spinner.ts";
 import { sanitizeTerminalText } from "../shared/terminal-text.ts";
 import type { WorktreeCleanup } from "../shared/worktree.ts";
 import type { AcceptanceLedger } from "./acceptance.ts";
@@ -334,19 +335,29 @@ export function createUsageReader(agents: readonly AgentRecord[]) {
   };
 }
 
-/** Colored square state indicator (no emojis/glyphs). */
-export const SQUARE = "■";
-
-export function stateSquare(state: AgentState, theme: Theme): string {
-  if (state === "done") return theme.fg("success", SQUARE);
-  if (state === "error") return theme.fg("error", SQUARE);
-  return theme.fg("warning", SQUARE);
+/**
+ * One status indicator per state, shared by the transcript card, the
+ * dashboard, and the strips. Running spins on the package-wide cadence so
+ * every live view animates in step.
+ */
+export function stateGlyph(
+  state: AgentState,
+  theme: Theme,
+  now: number,
+): string {
+  if (state === "done") return theme.fg("success", "✓");
+  if (state === "error") return theme.fg("error", "✗");
+  return theme.fg("warning", spinnerFrame(now));
 }
 
-export function statusSquare(status: WorkflowStatus, theme: Theme): string {
-  if (status === "completed") return theme.fg("success", SQUARE);
-  if (status === "running") return theme.fg("warning", SQUARE);
-  return theme.fg("error", SQUARE);
+export function statusGlyph(
+  status: WorkflowStatus,
+  theme: Theme,
+  now: number,
+): string {
+  if (status === "completed") return theme.fg("success", "✓");
+  if (status === "running") return theme.fg("warning", spinnerFrame(now));
+  return theme.fg("error", "✗");
 }
 
 export function statusWord(status: WorkflowStatus): string {

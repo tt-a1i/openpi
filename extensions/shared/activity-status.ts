@@ -8,8 +8,6 @@ export interface ActivityCounts {
   failed: number;
 }
 
-const SQUARE = "■";
-
 /**
  * Settled work is an unread notice, not a session tally: `done`/`failed` stay
  * visible until the user's next explicit request acknowledges them, while
@@ -49,15 +47,18 @@ export function formatActivityStatus(
   label: "subagents" | "workflows",
   counts: ActivityCounts,
 ) {
+  // No status glyphs here: the footer line is a static string refreshed on
+  // events, so a spinner would freeze between updates — the colored words
+  // carry the state on their own.
   const parts: string[] = [];
   if (counts.running > 0) {
-    parts.push(theme.fg("warning", `${SQUARE} ${counts.running} running`));
+    parts.push(theme.fg("warning", `${counts.running} running`));
   }
   if (counts.done > 0) {
-    parts.push(theme.fg("success", `${SQUARE} ${counts.done} done`));
+    parts.push(theme.fg("success", `${counts.done} done`));
   }
   if (counts.failed > 0) {
-    parts.push(theme.fg("error", `${SQUARE} ${counts.failed} failed`));
+    parts.push(theme.fg("error", `${counts.failed} failed`));
   }
   parts.push(theme.fg("accent", `/${label}`) + theme.fg("dim", " to view"));
 

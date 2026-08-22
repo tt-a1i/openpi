@@ -60,7 +60,7 @@ test("status text names its own view command", () => {
       done: 2,
       failed: 0,
     }),
-    "subagents: ■ 1 running · ■ 2 done · /subagents to view",
+    "subagents: 1 running · 2 done · /subagents to view",
   );
   assert.equal(
     formatActivityStatus(identityTheme, "workflows", {
@@ -68,6 +68,6 @@ test("status text names its own view command", () => {
       done: 0,
       failed: 3,
     }),
-    "workflows: ■ 3 failed · /workflows to view",
+    "workflows: 3 failed · /workflows to view",
   );
 });

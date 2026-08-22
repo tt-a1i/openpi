@@ -86,8 +86,8 @@ the parent conversation.
 
 ### 1.4 UI (carried over into v2 essentially as-is)
 
-1. **Footer status** (`ctx.ui.setStatus("subagents", ...)`): `subagents: ■ 2 running ·
-   ■ 1 done · ■ 1 failed · /subagents to view` (warning/success/error colored squares;
+1. **Footer status** (`ctx.ui.setStatus("subagents", ...)`): `subagents: 2 running ·
+   1 done · 1 failed · /subagents to view` (warning/success/error colored words;
    cleared when no subagents). Driven by manager change listener.
 2. **`subagent-result` message renderer**: status icon (`■`/`x`) + bold accent header
    `subagent sa-N · title · finished/failed`; collapsed = first 8 body lines +
